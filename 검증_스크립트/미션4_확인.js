@@ -1,0 +1,60 @@
+// 미션4: 기획서 완성 기준(원래 7개 + 새 기능 4개)을 Chrome에서 하나씩 해 보는 스크립트
+const { chromium } = require('playwright-core');
+const path = require('path'); const fs = require('fs');
+const file = path.resolve(process.argv[2]); const dir = process.argv[3];
+fs.mkdirSync(dir, { recursive: true });
+const url = 'file://' + encodeURI(file); const out = [];
+const log = (n, r) => { out.push({ name: n, result: r }); console.log(n + ' => ' + JSON.stringify(r)); };
+const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const card = (p, t) => p.locator('.card', { hasText: new RegExp('^' + esc(t) + '$') }).first();
+const state = p => p.evaluate(() => {
+  const r = { 카드: {}, 표시: {} };
+  document.querySelectorAll('.row').forEach(row => { const t = row.querySelector('.drop').dataset.tier;
+    r.카드[t] = [...row.querySelectorAll('.card')].map(c => c.textContent); r.표시[t] = row.querySelector('.label').textContent; });
+  r.카드.pool = [...document.querySelectorAll('#pool .card')].map(c => c.textContent);
+  r.표시.pool = document.querySelector('#pool-label').textContent;
+  return r; });
+const counts = async p => { const s = await state(p); const o = {}; for (const k of Object.keys(s.카드)) o[k] = s.카드[k].length + '장/' + s.표시[k]; return o; };
+const click = async (p, t, tier) => { await card(p, t).click(); await p.click(tier === 'pool' ? '#pool-label' : '.row.' + tier + ' .label'); };
+const drag = async (p, t, tier) => { await card(p, t).dragTo(tier === 'pool' ? p.locator('#pool') : p.locator('.row.' + tier + ' .drop')); };
+(async () => {
+  const ctx = await chromium.launchPersistentContext(fs.mkdtempSync('/tmp/m4-'), { channel: 'chrome', headless: true, viewport: { width: 1100, height: 1000 } });
+  const p = ctx.pages()[0]; const errors = []; p.on('pageerror', e => errors.push(String(e)));
+  await p.goto(url); await p.click('#reset');
+  log('처음: 칸별 카드 수/표시', await counts(p));
+  await p.screenshot({ path: dir + '/01_처음.png', fullPage: true });
+  const titles = (await state(p)).카드.pool; const T = ['S', 'A', 'B', 'C'];
+  await click(p, '기생충', 'S'); log('기생충 누르기→S 뒤', await counts(p));
+  await drag(p, '인터스텔라', 'S'); log('인터스텔라 끌기→S 뒤', await counts(p));
+  await drag(p, '기생충', 'B'); log('기생충 끌기 S→B 뒤', await counts(p));
+  await click(p, '인터스텔라', 'pool'); log('인터스텔라 누르기→미분류 뒤', await counts(p));
+  await p.click('#reset');
+  for (let i = 0; i < 8; i++) await (i % 2 ? drag : click)(p, titles[i], T[i % 4]);
+  const s8 = await state(p);
+  log('8개 모두 옮긴 뒤(누르기·끌기 번갈아) 카드', s8.카드); log('8개 모두 옮긴 뒤 표시', s8.표시);
+  log('카드 총수', await p.$$eval('.card', c => c.length));
+  await p.screenshot({ path: dir + '/02_8개_옮긴뒤.png', fullPage: true });
+  await p.fill('#title', '어바웃 타임'); await p.click('button[type=submit]');
+  log('어바웃 타임 추가 뒤 / 안내', [await counts(p), await p.textContent('#message')]);
+  await click(p, '어바웃 타임', 'A'); log('추가 영화 누르기→A 뒤', await counts(p));
+  await drag(p, '어바웃 타임', 'C'); log('추가 영화 끌기→C 뒤', await counts(p));
+  let n = await p.$$eval('.card', c => c.length);
+  for (const v of ['', '   ']) { await p.fill('#title', v); await p.click('button[type=submit]'); }
+  log('빈칸·공백 추가: 카드 수 변화 / 안내', [(await p.$$eval('.card', c => c.length)) - n, await p.textContent('#message')]);
+  const before = await state(p); await p.reload(); const after = await state(p);
+  log('다시 열기 전후 카드·표시 동일', JSON.stringify(before) === JSON.stringify(after)); log('다시 연 뒤', await counts(p));
+  const p2 = await ctx.newPage(); await p.close(); await p2.goto(url);
+  log('탭 닫고 다시 연 뒤 동일', JSON.stringify(before) === JSON.stringify(await state(p2)));
+  await p2.screenshot({ path: dir + '/03_다시연뒤.png', fullPage: true });
+  await card(p2, '기생충').click(); log('카드 선택 표시(aria-pressed)', await card(p2, '기생충').getAttribute('aria-pressed'));
+  await p2.click('.row.A .drop', { position: { x: 400, y: 70 } }); log('카드 고르고 A칸 빈 곳 누른 뒤', await counts(p2));
+  await p2.click('.row.S .label'); log('카드 안 고르고 S 누름 안내', await p2.textContent('#message'));
+  for (const w of [420, 360, 320]) { await p2.setViewportSize({ width: w, height: 800 });
+    log('폭 ' + w + 'px', await p2.evaluate(() => ({ 가로넘침: document.documentElement.scrollWidth > innerWidth, 화면밖요소: [...document.querySelectorAll('.card,.label,button,input,#pool-label')].filter(e => e.getBoundingClientRect().right > innerWidth + 0.5).length, 글자칸높이: Math.round(document.querySelector('.label').getBoundingClientRect().height), 글자칸폭: Math.round(document.querySelector('.label').getBoundingClientRect().width) })));
+    if (w === 360) await p2.screenshot({ path: dir + '/04_좁은화면_360.png' }); }
+  await p2.setViewportSize({ width: 1100, height: 1000 });
+  await p2.click('#reset'); log('처음으로 뒤', await counts(p2)); log('처음으로 뒤 미분류 카드', (await state(p2)).카드.pool);
+  await p2.screenshot({ path: dir + '/05_처음으로_뒤.png', fullPage: true });
+  log('외부 주소 참조 수', (fs.readFileSync(file, 'utf8').match(/https?:\/\//g) || []).length); log('페이지 오류', errors);
+  fs.writeFileSync(dir + '/test_log.json', JSON.stringify(out, null, 2)); await ctx.close();
+})().catch(e => { console.error('FATAL', e); process.exit(1); });
